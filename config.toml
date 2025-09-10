@@ -1,0 +1,6 @@
+# api_token of your bot 
+api_token = "SECRET_TOKEN"
+# list of users ids (int)
+users = [000000000]
+# journal folder
+journal_folder = "/home/someuser/notes/journal"
