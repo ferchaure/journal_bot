@@ -1,3 +1,5 @@
+// agregar al dict que sea por message id que que responda con las opciones para permitir paralelo
+// usar todo colas o algo safe
 package main
 
 import (
@@ -6,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,13 +24,26 @@ type Config struct {
 }
 
 const (
-	CommandJournal = "/journal"
-	CommandStop    = "/stop"
-	CommandStatus  = "/status"
+	CommandStop   = "/stop"
+	CommandStatus = "/status"
+	CommandHelp   = "/help"
 )
 
+const (
+	JournalCallback = "journal_"
+	FileCallback    = "file_"
+)
+
+type user_data struct { //just remember the last message of the user
+	Content           string
+	File              string
+	OriginalMessageID int
+	CurrMessageID     int
+}
+
 var cfg Config
-var chat_commands_status = make(map[int64]map[string]string)
+var users_info = make(map[int64]user_data)
+var users_info_mu sync.Mutex
 var events_count int64 = 0
 
 func main() {
@@ -50,7 +66,8 @@ func main() {
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(handler),
-		bot.WithCallbackQueryDataHandler("journal_", bot.MatchTypePrefix, journalcallbackHandler),
+		bot.WithCallbackQueryDataHandler(JournalCallback, bot.MatchTypePrefix, journalcallbackHandler),
+		bot.WithCallbackQueryDataHandler(FileCallback, bot.MatchTypePrefix, filecallbackHandler),
 	}
 
 	b, err := bot.New(cfg.ApiToken, opts...)
@@ -58,22 +75,22 @@ func main() {
 		panic(err)
 	}
 
-	b.RegisterHandler(bot.HandlerTypeMessageText, CommandJournal, bot.MatchTypeExact, journalHandler)
+	b.RegisterHandler(bot.HandlerTypeMessageText, CommandHelp, bot.MatchTypeExact, helpHandler)
 	b.RegisterHandler(bot.HandlerTypeMessageText, CommandStop, bot.MatchTypeExact, stopHandler)
 	b.RegisterHandler(bot.HandlerTypeMessageText, CommandStatus, bot.MatchTypeExact, statusHandler)
 
 	commands := []models.BotCommand{
 		{
-			Command:     CommandJournal,
-			Description: "To upload text to journal",
+			Command:     CommandHelp,
+			Description: "Show bot help",
 		},
 		{
 			Command:     CommandStatus,
-			Description: "returns number of events from the bot boot.",
+			Description: "Number of events from the boot.",
 		},
 		{
 			Command:     CommandStop,
-			Description: "stops the bot",
+			Description: "Stop the bot",
 		}}
 
 	for _, v := range cfg.Users {
@@ -97,6 +114,238 @@ func isUser(val int64) bool {
 	return false
 }
 
+func journal_filename(unixTime int) string {
+	// Get current date
+	// return in format YYYY-MM-DD
+	t := time.Unix(int64(unixTime), 0)
+
+	// Format as YYYY-MM-DD
+	return cfg.JournalFolder + t.Format("2006-01-02") + ".md"
+}
+
+func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if !isUser(update.Message.Chat.ID) {
+		return
+	}
+
+	default_kb := &models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{
+				{Text: "try add", CallbackData: "journal_add"},
+			},
+			{
+				{Text: "append", CallbackData: "journal_append"},
+			},
+		},
+	}
+
+	message, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.Message.Chat.ID,
+		Text:   "How do you want to update journal?:",
+		ReplyParameters: &models.ReplyParameters{
+			MessageID: update.Message.ID,
+			ChatID:    update.Message.Chat.ID,
+		},
+		ReplyMarkup: default_kb,
+	})
+
+	if err != nil {
+		fmt.Println("Error sending msg")
+	}
+
+	users_info_mu.Lock()
+	users_info[update.Message.Chat.ID] = user_data{
+		Content:           update.Message.Text,
+		File:              journal_filename(update.Message.Date),
+		OriginalMessageID: update.Message.ID,
+		CurrMessageID:     message.ID,
+	}
+	users_info_mu.Unlock()
+
+}
+
+func checkCallback(ctx context.Context, b *bot.Bot, update *models.Update) bool {
+	ID := update.CallbackQuery.From.ID
+
+	if !isUser(ID) {
+		return false
+	}
+	if users_info[ID].Content == "" {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: ID,
+			Text:   "Action over msg outside memory",
+		})
+		return false
+	}
+
+	if users_info[ID].CurrMessageID != int(update.CallbackQuery.Message.Message.ID) {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: ID,
+			Text:   "Action over old msg",
+		})
+		return false
+	}
+	return true
+}
+
+func FileExists(path string) bool {
+	_, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return true
+}
+
+func journalcallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if !checkCallback(ctx, b, update) {
+		return
+	}
+	path := journal_filename(update.CallbackQuery.Message.Message.Date)
+	var f *os.File
+	var err error
+	switch update.CallbackQuery.Data {
+	case "journal_add":
+		if FileExists(path) {
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: update.CallbackQuery.From.ID,
+				Text:   "Already exists, try append",
+				ReplyParameters: &models.ReplyParameters{
+					MessageID: users_info[update.CallbackQuery.From.ID].OriginalMessageID,
+					ChatID:    update.CallbackQuery.From.ID,
+				},
+			})
+
+			users_info_mu.Lock()
+			users_info[update.CallbackQuery.From.ID] = user_data{
+				Content:           users_info[update.CallbackQuery.From.ID].Content,
+				File:              path,
+				OriginalMessageID: users_info[update.CallbackQuery.From.ID].OriginalMessageID,
+				CurrMessageID:     update.CallbackQuery.Message.Message.ID,
+			}
+			users_info_mu.Unlock()
+
+			return
+		}
+		f, err = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	case "journal_append":
+		f, err = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+
+	}
+	if err != nil {
+		report_error(ctx, b, update.Message.Chat.ID, err)
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(users_info[update.CallbackQuery.From.ID].Content); err != nil {
+		report_error(ctx, b, update.CallbackQuery.From.ID, err)
+		return
+	}
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.CallbackQuery.From.ID,
+		Text:   "Text added to journal",
+		ReplyParameters: &models.ReplyParameters{
+			MessageID: users_info[update.CallbackQuery.From.ID].OriginalMessageID,
+			ChatID:    update.CallbackQuery.From.ID,
+		},
+	})
+
+	delete(users_info, update.CallbackQuery.From.ID)
+}
+
+func filecallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	// answering callback query first to let Telegram know that we received the callback query,
+	// and we're handling it. Otherwise, Telegram might retry sending the update repetitively
+	// as it thinks the callback query doesn't reach to our application. learn more by
+	// reading the footnote of the https://core.telegram.org/bots/api#callbackquery type.
+	if !isUser(update.Message.Chat.ID) {
+		return
+	}
+	if !checkCallback(ctx, b, update) {
+		return
+	}
+	// default_kb := &models.InlineKeyboardMarkup{
+	// 	InlineKeyboard: [][]models.InlineKeyboardButton{
+	// 		{
+	// 			{Text: "replace", CallbackData: "journal_replace"},
+	// 			{Text: "append", CallbackData: "journal_append"},
+	// 		},
+	// 		{
+	// 			{Text: "read", CallbackData: "journal_read"},
+	// 			{Text: "cancel", CallbackData: "journal_cancel"},
+	// 		},
+	// 	},
+	// }
+	// b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+	// 	CallbackQueryID: update.CallbackQuery.ID,
+	// 	ShowAlert:       false,
+	// })
+	// path := chat_commands_status[update.CallbackQuery.From.ID]["path"]
+	// switch update.CallbackQuery.Data {
+	// case "journal_cancel":
+	// 	delete(chat_commands_status, update.CallbackQuery.From.ID)
+	// 	b.SendMessage(ctx, &bot.SendMessageParams{
+	// 		ChatID: update.CallbackQuery.From.ID,
+	// 		Text:   "Operation cancelled",
+	// 	})
+	// case "journal_read":
+	// 	data, err := os.ReadFile(path)
+	// 	if err != nil {
+	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
+	// 		return
+	// 	}
+	// 	b.SendMessage(ctx, &bot.SendMessageParams{
+	// 		ChatID: update.CallbackQuery.From.ID,
+	// 		Text:   string(data),
+	// 	})
+	// case "journal_replace":
+	// 	f, err := os.OpenFile(path, os.O_TRUNC|os.O_WRONLY, 0644)
+	// 	if err != nil {
+	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
+	// 		return
+	// 	}
+	// 	defer f.Close()
+	// 	if _, err := f.WriteString(chat_commands_status[update.CallbackQuery.From.ID]["text"]); err != nil {
+	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
+	// 		return
+	// 	}
+	// 	delete(chat_commands_status, update.CallbackQuery.From.ID)
+	// case "journal_append":
+	// 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	// 	if err != nil {
+	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
+	// 		return
+	// 	}
+	// 	defer f.Close()
+	// 	if _, err := f.WriteString("\n\n" + chat_commands_status[update.CallbackQuery.From.ID]["text"]); err != nil {
+	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
+	// 		return
+	// 	}
+	// 	b.SendMessage(ctx, &bot.SendMessageParams{
+	// 		ChatID: update.CallbackQuery.From.ID,
+	// 		Text:   "Texto añadido al journal",
+	// 	})
+	// 	delete(chat_commands_status, update.CallbackQuery.From.ID)
+	// }
+}
+
+func report_error(ctx context.Context, b *bot.Bot, id int64, err error) {
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: id,
+		Text:   "*Error*:\n" + err.Error(),
+	})
+	fmt.Println("*Error*:\n", err)
+}
+
+func helpHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if !isUser(update.Message.Chat.ID) {
+		return
+	}
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.Message.Chat.ID,
+		Text:   "Sent a message and you will be prompted with options.",
+	})
+}
 func statusHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if !isUser(update.Message.Chat.ID) {
 		return
@@ -116,157 +365,4 @@ func stopHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		Text:   "Stopping bot...",
 	})
 	os.Exit(0)
-}
-
-func journalHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if !isUser(update.Message.Chat.ID) {
-		return
-	}
-	path := journal_filename(update.Message.Date)
-	chat_commands_status[update.Message.Chat.ID] = make(map[string]string)
-	chat_commands_status[update.Message.Chat.ID]["command"] = CommandJournal
-	chat_commands_status[update.Message.Chat.ID]["path"] = path
-
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    update.Message.Chat.ID,
-		Text:      fmt.Sprintf("Send text to add to journal (%s):", path),
-		ParseMode: models.ParseModeMarkdown,
-	})
-
-}
-
-func journal_filename(unixTime int) string {
-	// Get current date
-	// return in format YYYY-MM-DD
-	t := time.Unix(int64(unixTime), 0)
-
-	// Format as YYYY-MM-DD
-	return cfg.JournalFolder + t.Format("2006-01-02") + ".md"
-}
-
-func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if !isUser(update.Message.Chat.ID) {
-		return
-	}
-	if chat_commands_status[update.Message.Chat.ID] == nil {
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "Sent a command first",
-		})
-		return
-	}
-
-	if chat_commands_status[update.Message.Chat.ID]["command"] == CommandJournal {
-		path := chat_commands_status[update.Message.Chat.ID]["path"]
-		chat_commands_status[update.Message.Chat.ID]["text"] = update.Message.Text
-		if _, err := os.Stat(path); err == nil {
-			kb := &models.InlineKeyboardMarkup{
-				InlineKeyboard: [][]models.InlineKeyboardButton{
-					{
-						{Text: "replace", CallbackData: "journal_replace"},
-						{Text: "append", CallbackData: "journal_append"},
-					},
-					{
-						{Text: "read", CallbackData: "journal_read"},
-						{Text: "cancel", CallbackData: "journal_cancel"},
-					},
-				},
-			}
-
-			b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:      update.Message.Chat.ID,
-				Text:        "File already exists. Select action:",
-				ReplyMarkup: kb,
-			})
-			fmt.Printf("Asking action about: %s \n ", path)
-			return
-		}
-
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			report_error(ctx, b, update.Message.Chat.ID, err)
-			return
-		}
-		defer f.Close()
-		if _, err := f.WriteString(update.Message.Text); err != nil {
-			report_error(ctx, b, update.Message.Chat.ID, err)
-			return
-		}
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "Texto añadido al journal",
-		})
-		delete(chat_commands_status, update.Message.Chat.ID)
-	}
-
-	// b.SendMessage(ctx, &bot.SendMessageParams{
-	// 	ChatID: update.Message.Chat.ID,
-	// 	Text:   time.Unix(int64(update.Message.Date), 0).Format("2006-01-02 15:04:05"),
-	// })
-}
-
-func journalcallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	// answering callback query first to let Telegram know that we received the callback query,
-	// and we're handling it. Otherwise, Telegram might retry sending the update repetitively
-	// as it thinks the callback query doesn't reach to our application. learn more by
-	// reading the footnote of the https://core.telegram.org/bots/api#callbackquery type.
-	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-		CallbackQueryID: update.CallbackQuery.ID,
-		ShowAlert:       false,
-	})
-	path := chat_commands_status[update.CallbackQuery.From.ID]["path"]
-	switch update.CallbackQuery.Data {
-	case "journal_cancel":
-		delete(chat_commands_status, update.CallbackQuery.From.ID)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.CallbackQuery.From.ID,
-			Text:   "Operation cancelled",
-		})
-	case "journal_read":
-		data, err := os.ReadFile(path)
-		if err != nil {
-			report_error(ctx, b, update.CallbackQuery.From.ID, err)
-			return
-		}
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.CallbackQuery.From.ID,
-			Text:   string(data),
-		})
-	case "journal_replace":
-		f, err := os.OpenFile(path, os.O_TRUNC|os.O_WRONLY, 0644)
-		if err != nil {
-			report_error(ctx, b, update.CallbackQuery.From.ID, err)
-			return
-		}
-		defer f.Close()
-		if _, err := f.WriteString(chat_commands_status[update.CallbackQuery.From.ID]["text"]); err != nil {
-			report_error(ctx, b, update.CallbackQuery.From.ID, err)
-			return
-		}
-		delete(chat_commands_status, update.CallbackQuery.From.ID)
-	case "journal_append":
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			report_error(ctx, b, update.CallbackQuery.From.ID, err)
-			return
-		}
-		defer f.Close()
-		if _, err := f.WriteString("\n\n" + chat_commands_status[update.CallbackQuery.From.ID]["text"]); err != nil {
-			report_error(ctx, b, update.CallbackQuery.From.ID, err)
-			return
-		}
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.CallbackQuery.From.ID,
-			Text:   "Texto añadido al journal",
-		})
-		delete(chat_commands_status, update.CallbackQuery.From.ID)
-	}
-}
-
-func report_error(ctx context.Context, b *bot.Bot, id int64, err error) {
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: id,
-		Text:   "*Error*:\n" + err.Error(),
-	})
-	fmt.Println("*Error*:\n", err)
 }
