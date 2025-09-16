@@ -34,6 +34,11 @@ const (
 	FileCallback    = "file_"
 )
 
+const (
+	JournalAdd    = JournalCallback + "add"
+	JournalAppend = JournalCallback + "append"
+)
+
 type user_data struct { //just remember the last message of the user
 	Content           string
 	File              string
@@ -131,10 +136,10 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	default_kb := &models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
-				{Text: "try add", CallbackData: "journal_add"},
+				{Text: "try add", CallbackData: JournalAdd},
 			},
 			{
-				{Text: "append", CallbackData: "journal_append"},
+				{Text: "append", CallbackData: JournalAppend},
 			},
 		},
 	}
@@ -196,6 +201,40 @@ func FileExists(path string) bool {
 	return true
 }
 
+func askFile(path string, ctx context.Context, b *bot.Bot,
+	update *models.Update, chatID int64, msgID int) (int, error) {
+	file_kb := &models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{
+				{Text: "replace", CallbackData: "file_replace"},
+			},
+			{
+				{Text: "read", CallbackData: "file_read"},
+				{Text: "cancel", CallbackData: "file_cancel"},
+			},
+			{
+				{Text: "overwrite", CallbackData: "file_overwrite"},
+			},
+		},
+	}
+	msg, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   "What to do with the file: " + path,
+		ReplyParameters: &models.ReplyParameters{
+			MessageID: msgID,
+			ChatID:    chatID,
+		},
+		ReplyMarkup: file_kb,
+	})
+	var ID int
+	if err == nil {
+		ID = msg.ID
+	} else {
+		ID = 0
+	}
+	return ID, err
+}
+
 func journalcallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if !checkCallback(ctx, b, update) {
 		return
@@ -203,31 +242,35 @@ func journalcallbackHandler(ctx context.Context, b *bot.Bot, update *models.Upda
 	path := journal_filename(update.CallbackQuery.Message.Message.Date)
 	var f *os.File
 	var err error
+
 	switch update.CallbackQuery.Data {
-	case "journal_add":
+	case JournalAdd:
 		if FileExists(path) {
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.CallbackQuery.From.ID,
-				Text:   "Already exists, try append",
+				Text:   "File already exists.",
 				ReplyParameters: &models.ReplyParameters{
 					MessageID: users_info[update.CallbackQuery.From.ID].OriginalMessageID,
 					ChatID:    update.CallbackQuery.From.ID,
 				},
 			})
+			var ID int
+			ID, err = askFile(path, ctx, b, update,
+				update.CallbackQuery.From.ID, users_info[update.CallbackQuery.From.ID].OriginalMessageID)
 
-			users_info_mu.Lock()
-			users_info[update.CallbackQuery.From.ID] = user_data{
-				Content:           users_info[update.CallbackQuery.From.ID].Content,
-				File:              path,
-				OriginalMessageID: users_info[update.CallbackQuery.From.ID].OriginalMessageID,
-				CurrMessageID:     update.CallbackQuery.Message.Message.ID,
+			if err == nil {
+				users_info_mu.Lock()
+				udata := users_info[update.CallbackQuery.From.ID]
+				udata.File = path
+				udata.CurrMessageID = ID
+				users_info[update.CallbackQuery.From.ID] = udata
+				users_info_mu.Unlock()
 			}
-			users_info_mu.Unlock()
 
 			return
 		}
 		f, err = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	case "journal_append":
+	case JournalAppend:
 		f, err = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 
 	}
@@ -264,18 +307,7 @@ func filecallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update)
 	if !checkCallback(ctx, b, update) {
 		return
 	}
-	// default_kb := &models.InlineKeyboardMarkup{
-	// 	InlineKeyboard: [][]models.InlineKeyboardButton{
-	// 		{
-	// 			{Text: "replace", CallbackData: "journal_replace"},
-	// 			{Text: "append", CallbackData: "journal_append"},
-	// 		},
-	// 		{
-	// 			{Text: "read", CallbackData: "journal_read"},
-	// 			{Text: "cancel", CallbackData: "journal_cancel"},
-	// 		},
-	// 	},
-	// }
+
 	// b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 	// 	CallbackQueryID: update.CallbackQuery.ID,
 	// 	ShowAlert:       false,
