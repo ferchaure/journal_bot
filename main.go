@@ -39,6 +39,13 @@ const (
 	JournalAppend = JournalCallback + "append"
 )
 
+const (
+	FileReplace = FileCallback + "replace"
+	FileAppend  = FileCallback + "append"
+	FileRead    = FileCallback + "read"
+	FileCancel  = FileCallback + "cancel"
+)
+
 type user_data struct { //just remember the last message of the user
 	Content           string
 	File              string
@@ -136,7 +143,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	default_kb := &models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
-				{Text: "try add", CallbackData: JournalAdd},
+				{Text: "write", CallbackData: JournalAdd},
 			},
 			{
 				{Text: "append", CallbackData: JournalAppend},
@@ -206,14 +213,12 @@ func askFile(path string, ctx context.Context, b *bot.Bot,
 	file_kb := &models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{
-				{Text: "replace", CallbackData: "file_replace"},
+				{Text: "replace", CallbackData: FileReplace},
+				{Text: "overwrite", CallbackData: FileAppend},
 			},
 			{
-				{Text: "read", CallbackData: "file_read"},
-				{Text: "cancel", CallbackData: "file_cancel"},
-			},
-			{
-				{Text: "overwrite", CallbackData: "file_overwrite"},
+				{Text: "read", CallbackData: FileRead},
+				{Text: "cancel", CallbackData: FileCancel},
 			},
 		},
 	}
@@ -297,68 +302,68 @@ func journalcallbackHandler(ctx context.Context, b *bot.Bot, update *models.Upda
 }
 
 func filecallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	// answering callback query first to let Telegram know that we received the callback query,
-	// and we're handling it. Otherwise, Telegram might retry sending the update repetitively
-	// as it thinks the callback query doesn't reach to our application. learn more by
-	// reading the footnote of the https://core.telegram.org/bots/api#callbackquery type.
-	if !isUser(update.Message.Chat.ID) {
+	if !isUser(update.CallbackQuery.From.ID) {
 		return
 	}
 	if !checkCallback(ctx, b, update) {
 		return
 	}
 
-	// b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-	// 	CallbackQueryID: update.CallbackQuery.ID,
-	// 	ShowAlert:       false,
-	// })
-	// path := chat_commands_status[update.CallbackQuery.From.ID]["path"]
-	// switch update.CallbackQuery.Data {
-	// case "journal_cancel":
-	// 	delete(chat_commands_status, update.CallbackQuery.From.ID)
-	// 	b.SendMessage(ctx, &bot.SendMessageParams{
-	// 		ChatID: update.CallbackQuery.From.ID,
-	// 		Text:   "Operation cancelled",
-	// 	})
-	// case "journal_read":
-	// 	data, err := os.ReadFile(path)
-	// 	if err != nil {
-	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
-	// 		return
-	// 	}
-	// 	b.SendMessage(ctx, &bot.SendMessageParams{
-	// 		ChatID: update.CallbackQuery.From.ID,
-	// 		Text:   string(data),
-	// 	})
-	// case "journal_replace":
-	// 	f, err := os.OpenFile(path, os.O_TRUNC|os.O_WRONLY, 0644)
-	// 	if err != nil {
-	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
-	// 		return
-	// 	}
-	// 	defer f.Close()
-	// 	if _, err := f.WriteString(chat_commands_status[update.CallbackQuery.From.ID]["text"]); err != nil {
-	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
-	// 		return
-	// 	}
-	// 	delete(chat_commands_status, update.CallbackQuery.From.ID)
-	// case "journal_append":
-	// 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
-	// 	if err != nil {
-	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
-	// 		return
-	// 	}
-	// 	defer f.Close()
-	// 	if _, err := f.WriteString("\n\n" + chat_commands_status[update.CallbackQuery.From.ID]["text"]); err != nil {
-	// 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
-	// 		return
-	// 	}
-	// 	b.SendMessage(ctx, &bot.SendMessageParams{
-	// 		ChatID: update.CallbackQuery.From.ID,
-	// 		Text:   "Texto añadido al journal",
-	// 	})
-	// 	delete(chat_commands_status, update.CallbackQuery.From.ID)
-	// }
+	path := users_info[update.CallbackQuery.From.ID].File
+	content := users_info[update.CallbackQuery.From.ID].Content
+
+	switch update.CallbackQuery.Data {
+	case FileCancel:
+		delete(users_info, update.CallbackQuery.From.ID)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.CallbackQuery.From.ID,
+			Text:   "Operation cancelled",
+		})
+		delete(users_info, update.CallbackQuery.From.ID)
+	case FileRead:
+		data, err := os.ReadFile(path)
+		if err != nil {
+			report_error(ctx, b, update.CallbackQuery.From.ID, err)
+			return
+		}
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.CallbackQuery.From.ID,
+			Text:   string(data),
+		})
+	case FileReplace:
+		f, err := os.OpenFile(path, os.O_TRUNC|os.O_WRONLY, 0644)
+		if err != nil {
+			report_error(ctx, b, update.CallbackQuery.From.ID, err)
+			return
+		}
+		defer f.Close()
+		if _, err := f.WriteString(content); err != nil {
+			report_error(ctx, b, update.CallbackQuery.From.ID, err)
+			return
+		}
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.CallbackQuery.From.ID,
+			Text:   "File replaced successfully",
+		})
+		delete(users_info, update.CallbackQuery.From.ID)
+	case FileAppend:
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			report_error(ctx, b, update.CallbackQuery.From.ID, err)
+			return
+		}
+		defer f.Close()
+		if _, err := f.WriteString("\n\n" + content); err != nil {
+			report_error(ctx, b, update.CallbackQuery.From.ID, err)
+			return
+		}
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.CallbackQuery.From.ID,
+			Text:   "Content added to file",
+		})
+		delete(users_info, update.CallbackQuery.From.ID)
+	}
+
 }
 
 func report_error(ctx context.Context, b *bot.Bot, id int64, err error) {
