@@ -55,7 +55,7 @@ journal_folder = "/path/to/your/journal/directory"
 
 4. Run the bot:
 ```bash
-go run main.go
+go run .
 ```
 
 ## 📖 Usage
