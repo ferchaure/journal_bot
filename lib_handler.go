@@ -15,7 +15,7 @@ import (
 
 var events_count int64 = 0
 var users_info = make(map[int64]user_data)
-var users_info_mu sync.Mutex
+var users_info_mu sync.RWMutex
 
 const (
 	CommandStop   = "/stop"
@@ -169,12 +169,16 @@ func checkCallback(ctx context.Context, b *bot.Bot, update *models.Update) bool 
 	if !isUser(ID) {
 		return false
 	}
-	if users_info[ID].Content == "" {
+	users_info_mu.RLock()
+	u := users_info[ID]
+	users_info_mu.RUnlock()
+
+	if u.Content == "" {
 		SendMsg(ctx, b, "Action over msg outside memory", ID)
 		return false
 	}
 
-	if users_info[ID].CurrMessageID != int(update.CallbackQuery.Message.Message.ID) {
+	if u.CurrMessageID != int(update.CallbackQuery.Message.Message.ID) {
 		SendMsg(ctx, b, "Action over old msg", ID)
 		return false
 	}
@@ -261,16 +265,22 @@ func journalcallbackHandler(ctx context.Context, b *bot.Bot, update *models.Upda
 		report_error(ctx, b, update.CallbackQuery.From.ID, err)
 		return
 	}
+	users_info_mu.RLock()
+	orig := users_info[update.CallbackQuery.From.ID].OriginalMessageID
+	users_info_mu.RUnlock()
+
 	b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: update.CallbackQuery.From.ID,
 		Text:   "Text added to journal",
 		ReplyParameters: &models.ReplyParameters{
-			MessageID: users_info[update.CallbackQuery.From.ID].OriginalMessageID,
+			MessageID: orig,
 			ChatID:    update.CallbackQuery.From.ID,
 		},
 	})
 
+	users_info_mu.Lock()
 	delete(users_info, update.CallbackQuery.From.ID)
+	users_info_mu.Unlock()
 }
 
 func filecallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -281,14 +291,17 @@ func filecallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update)
 		return
 	}
 
+	users_info_mu.RLock()
 	path := users_info[update.CallbackQuery.From.ID].File
 	content := users_info[update.CallbackQuery.From.ID].Content
+	users_info_mu.RUnlock()
 
 	switch update.CallbackQuery.Data {
 	case FileCancel:
+		users_info_mu.Lock()
 		delete(users_info, update.CallbackQuery.From.ID)
 		SendMsg(ctx, b, "Operation cancelled", update.CallbackQuery.From.ID)
-		delete(users_info, update.CallbackQuery.From.ID)
+		users_info_mu.Unlock()
 	case FileRead:
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -309,7 +322,9 @@ func filecallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update)
 			return
 		}
 		SendMsg(ctx, b, "File replaced successfully", update.CallbackQuery.From.ID)
+		users_info_mu.Lock()
 		delete(users_info, update.CallbackQuery.From.ID)
+		users_info_mu.Unlock()
 	case FileAppend:
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -322,7 +337,9 @@ func filecallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update)
 			return
 		}
 		SendMsg(ctx, b, "Content added to file", update.CallbackQuery.From.ID)
+		users_info_mu.Lock()
 		delete(users_info, update.CallbackQuery.From.ID)
+		users_info_mu.Unlock()
 	}
 
 }

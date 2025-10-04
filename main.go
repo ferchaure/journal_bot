@@ -1,5 +1,3 @@
-// agregar al dict que sea por message id que que responda con las opciones para permitir paralelo
-// usar todo colas o algo safe
 package main
 
 import (

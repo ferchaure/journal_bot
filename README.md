@@ -74,9 +74,8 @@ The following features I want to add:
 - **Read Specific Files**: Read content from specific `.md` files by date or filename
 - **File Listing**: Browse available journal files
 - **File Search**: Search through journal entries for specific content
-- **File Deletion**: Remove specific journal entries (with confirmation)
 - **Error Handling**: A decent log of activity and actions
 - **Custom Commands**: Allow users to define custom actions for specific files
-- **Scheduled Actions**: Automatically notify reading tasks from notes
+- **Scheduled Actions**: Automatically notify tasks from notes
 - **Image Attachments**: Handle and store images in journal entries
 - **Easy Library Replacement**: Switch to a different Telegram bot library or implement manual API handling
